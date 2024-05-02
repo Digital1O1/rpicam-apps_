@@ -166,8 +166,10 @@ static void event_loop(RPiCamStillApp &app)
 	bool output = !options->output.empty() || options->datetime || options->timestamp; // output requested?
 	bool keypress = options->keypress || options->signal; // "signal" mode is much like "keypress" mode
 	unsigned int still_flags = RPiCamApp::FLAG_STILL_NONE;
-	if (options->encoding == "rgb" || options->encoding == "png")
+	if (options->encoding == "rgb24" || options->encoding == "png")
 		still_flags |= RPiCamApp::FLAG_STILL_BGR;
+	if (options->encoding == "rgb48")
+		still_flags |= RPiCamApp::FLAG_STILL_BGR48;
 	else if (options->encoding == "bmp")
 		still_flags |= RPiCamApp::FLAG_STILL_RGB;
 	if (options->raw)
@@ -250,7 +252,7 @@ static void event_loop(RPiCamStillApp &app)
 
 			if (af_wait_state != AF_WAIT_NONE)
 			{
-				FrameInfo fi(completed_request->metadata);
+				FrameInfo fi(completed_request);
 				bool scanning = fi.af_state == libcamera::controls::AfStateScanning;
 				if (scanning || (af_wait_state == AF_WAIT_SCANNING && ++af_wait_timeout >= 16))
 					af_wait_state = AF_WAIT_FINISHED;

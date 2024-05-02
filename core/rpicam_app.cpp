@@ -26,52 +26,6 @@
 
 unsigned int RPiCamApp::verbosity = 1;
 
-enum class Platform
-{
-	MISSING,
-	UNKNOWN,
-	LEGACY,
-	VC4,
-	PISP,
-};
-
-Platform get_platform()
-{
-	bool unknown = false;
-	for (unsigned int device_num = 0; device_num < 5; device_num++)
-	{
-		char device_name[16];
-		snprintf(device_name, sizeof(device_name), "/dev/video%u", device_num);
-		int fd = open(device_name, O_RDWR, 0);
-		if (fd < 0)
-			continue;
-
-		v4l2_capability caps;
-		unsigned long request = VIDIOC_QUERYCAP;
-
-		int ret = ioctl(fd, request, &caps);
-		close(fd);
-
-		if (ret)
-			continue;
-
-		// We are not concerned with UVC devices for now.
-		if (!strncmp((char *)caps.driver, "uvcvideo", sizeof(caps.card)))
-			continue;
-
-		if (!strncmp((char *)caps.card, "unicam", sizeof(caps.card)))
-			return Platform::VC4;
-		else if (!strncmp((char *)caps.card, "rp1-cfe", sizeof(caps.card)))
-			return Platform::PISP;
-		else if (!strncmp((char *)caps.card, "bm2835 mmal", sizeof(caps.card)))
-			return Platform::LEGACY;
-		else
-			unknown = true;
-	}
-
-	return unknown ? Platform::UNKNOWN : Platform::MISSING;
-}
-
 static libcamera::PixelFormat mode_to_pixel_format(Mode const &mode)
 {
 	// The saving grace here is that we can ignore the Bayer order and return anything -
@@ -121,7 +75,12 @@ static void set_pipeline_configuration(Platform platform)
 RPiCamApp::RPiCamApp(std::unique_ptr<Options> opts)
 	: options_(std::move(opts)), controls_(controls::controls), post_processor_(this)
 {
-	Platform platform = get_platform();
+	if (!options_)
+		options_ = std::make_unique<Options>();
+
+	options_->SetApp(this);
+
+	Platform platform = options_->GetPlatform();
 	if (platform == Platform::LEGACY)
 	{
 		// If we definitely appear to be running the old camera stack, complain and give up.
@@ -134,11 +93,6 @@ RPiCamApp::RPiCamApp(std::unique_ptr<Options> opts)
 						"Contributions for other platforms are welcome at https://github.com/raspberrypi/rpicam-apps.\n");
 		exit(-1);
 	}
-
-	if (!options_)
-		options_ = std::make_unique<Options>();
-
-	options_->SetApp(this);
 
 	set_pipeline_configuration(platform);
 }
@@ -525,6 +479,10 @@ void RPiCamApp::ConfigureStill(unsigned int flags)
 		configuration_->at(0).pixelFormat = libcamera::formats::BGR888;
 	else if (flags & FLAG_STILL_RGB)
 		configuration_->at(0).pixelFormat = libcamera::formats::RGB888;
+	else if (flags & FLAG_STILL_BGR48)
+		configuration_->at(0).pixelFormat = libcamera::formats::BGR161616;
+	else if (flags & FLAG_STILL_RGB48)
+		configuration_->at(0).pixelFormat = libcamera::formats::RGB161616;
 	else
 		configuration_->at(0).pixelFormat = libcamera::formats::YUV420;
 	if ((flags & FLAG_STILL_BUFFER_MASK) == FLAG_STILL_DOUBLE_BUFFER)
@@ -676,7 +634,7 @@ void RPiCamApp::StartCamera()
 	// We don't overwrite anything the application may have set before calling us.
 	if (!controls_.get(controls::ScalerCrop) && options_->roi_width != 0 && options_->roi_height != 0)
 	{
-		Rectangle sensor_area = *camera_->properties().get(properties::ScalerCropMaximum);
+		Rectangle sensor_area = camera_->controls().at(&controls::ScalerCrop).max().get<Rectangle>();
 		int x = options_->roi_x * sensor_area.width;
 		int y = options_->roi_y * sensor_area.height;
 		int w = options_->roi_width * sensor_area.width;
@@ -690,7 +648,7 @@ void RPiCamApp::StartCamera()
 	if (!controls_.get(controls::AfWindows) && !controls_.get(controls::AfMetering) && options_->afWindow_width != 0 &&
 		options_->afWindow_height != 0)
 	{
-		Rectangle sensor_area = *camera_->properties().get(properties::ScalerCropMaximum);
+		Rectangle sensor_area = camera_->controls().at(&controls::ScalerCrop).max().get<Rectangle>();
 		int x = options_->afWindow_x * sensor_area.width;
 		int y = options_->afWindow_y * sensor_area.height;
 		int w = options_->afWindow_width * sensor_area.width;
@@ -1196,9 +1154,7 @@ void RPiCamApp::previewThread()
 		libcamera::Span span = r.Get()[0];
 
 		// Fill the frame info with the ControlList items and ancillary bits.
-		FrameInfo frame_info(item.completed_request->metadata);
-		frame_info.fps = item.completed_request->framerate;
-		frame_info.sequence = item.completed_request->sequence;
+		FrameInfo frame_info(item.completed_request);
 
 		int fd = buffer->planes()[0].fd.get();
 		{
